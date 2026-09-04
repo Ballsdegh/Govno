@@ -257,10 +257,10 @@ stock FamilyGui_Create(playerid, const source_name[])
     if(!(6 <= fam_len <= 32))
         return SendClientMessage(playerid, 0xCECECEFF, "Название семьи должно быть от 6 до 32 символов");
 
-    // Шаблон INSERT сам по себе занимает 221 символ, поэтому в query[256]
-    // готовый запрос не помещался: mysql_format обрезал его по границе буфера,
-    // MySQL получал битый SQL и возвращал ошибку 1064. Буфер увеличен.
-    new query[512];
+    // Буфер: полный INSERT со всеми колонками занимает ~900 символов
+    // (старый query[256] не вмещал даже прежний укороченный вариант на 221
+    // символ — mysql_format молча резал запрос по границе буфера).
+    new query[1536];
 
     // Проверка занятости названия — раньше её не было, и INSERT падал
     // на UNIQUE-индексе поля `name` с ошибкой 1062 вместо внятного сообщения.
@@ -279,16 +279,46 @@ stock FamilyGui_Create(playerid, const source_name[])
     }
     cache_delete(dup_cache);
 
+    // ГЛАВНАЯ ПРИЧИНА ОШИБКИ: старый INSERT заполнял только 14 колонок из 47.
+    // Остальные 33 (rank1..rank10, pos_x/y/z/fa, inter, world, money, drugs,
+    // tree, metal, ammo, house_id, color, level, exp, ochki..ochki4,
+    // family_cars, ad_text) LoadFamily() читает, но при вставке они не
+    // задавались. Таблица `family` геймодом не создаётся (её нет ни в одном
+    // CREATE TABLE) — она пришла из дампа, где эти поля объявлены NOT NULL
+    // без DEFAULT. MySQL в STRICT_TRANS_TABLES (режим по умолчанию с 5.7)
+    // отклоняет такой INSERT с ошибкой 1364 "Field doesn't have a default
+    // value". Поэтому запрос падал всегда, независимо от названия семьи.
+    // Теперь перечисляем все колонки явно со здравыми значениями.
     mysql_format(mysql, query, sizeof query,
-        "INSERT INTO family (name, u_id, time, r_TakeMoney, r_TakeDrugs, r_TakeMetall, r_TakeAmmo, r_Inv, r_UnInv, r_Mute, r_UnMute, r_Warn, r_UnWarn, r_GiveRang) \
-        VALUES ('%e', %d, %d, 10, 10, 10, 10, 9, 9, 9, 9, 9, 9, 10)",
+        "INSERT INTO family (name, u_id, time, color, level, exp, \
+        rank1, rank2, rank3, rank4, rank5, rank6, rank7, rank8, rank9, rank10, \
+        money, drugs, tree, metal, ammo, house_id, \
+        pos_x, pos_y, pos_z, pos_fa, inter, world, \
+        ochki, ochki1, ochki2, ochki3, ochki4, family_cars, ad_text, \
+        r_TakeMoney, r_TakeDrugs, r_TakeMetall, r_TakeAmmo, \
+        r_Inv, r_UnInv, r_Mute, r_UnMute, r_Warn, r_UnWarn, r_GiveRang) \
+        VALUES ('%e', %d, %d, 0, 1, 0, \
+        '1 ранг', '2 ранг', '3 ранг', '4 ранг', '5 ранг', \
+        '6 ранг', '7 ранг', '8 ранг', '9 ранг', 'Лидер', \
+        0, 0, 0, 0, 0, -1, \
+        0.0, 0.0, 0.0, 0.0, 0, 0, \
+        0, 0, 0, 0, 0, 0, '', \
+        10, 10, 10, 10, 9, 9, 9, 9, 9, 9, 10)",
         fam_name, GetPlayerAccountID(playerid), gettime());
     mysql_query(mysql, query, false);
 
     if(mysql_errno())
     {
-        printf("[FAMILY CREATE] mysql_errno #1: %d", mysql_errno());
-        return SendClientMessage(playerid, 0xCECECEFF, "Ошибка создания семьи, попробуйте позже");
+        // Печатаем и код, и сам запрос — по коду сразу видно причину:
+        // 1054 = нет такой колонки, 1146 = нет таблицы `family`,
+        // 1364 = колонка без DEFAULT, 1062 = дубликат, 1064 = битый SQL.
+        new err = mysql_errno();
+        printf("[FAMILY CREATE] INSERT failed, mysql_errno = %d", err);
+        printf("[FAMILY CREATE] query was: %s", query);
+
+        new err_msg[144];
+        format(err_msg, sizeof err_msg, "Ошибка создания семьи (код MySQL: %d). Сообщите администрации.", err);
+        return SendClientMessage(playerid, 0xCECECEFF, err_msg);
     }
 
     mysql_format(mysql, query, sizeof query, "SELECT * FROM family WHERE u_id = %d ORDER BY id DESC LIMIT 1", GetPlayerAccountID(playerid));
@@ -309,6 +339,8 @@ stock FamilyGui_Create(playerid, const source_name[])
     SetFamilyData(fam_id, F_TIME,      cache_get_field_content_int(0, "time"));
     SetFamilyData(fam_id, F_COLOR,     cache_get_field_content_int(0, "color"));
     SetFamilyData(fam_id, F_HOUSE_ID,  -1);
+    SetFamilyData(fam_id, F_LEVEL,     1);   // раньше не выставлялись — семья
+    SetFamilyData(fam_id, F_EXP,       0);   // до перезахода была 0 уровня
     SetFamilyData(fam_id, F_TAKE_MONEY, cache_get_field_content_int(0, "r_TakeMoney"));
     SetFamilyData(fam_id, F_TAKE_DRUGS, cache_get_field_content_int(0, "r_TakeDrugs"));
     SetFamilyData(fam_id, F_TAKE_METALL,cache_get_field_content_int(0, "r_TakeMetall"));
